@@ -228,8 +228,8 @@ class CarDDDataset:
             if exported % 100 == 0:
                 print(f"Exported {exported} images...")
 
-        print(f"✓ Exported {exported} images to {output_dir}")
-        print(f"✓ Created data.yaml with {len(categories)} categories")
+        print(f"Exported {exported} images to {output_dir}")
+        print(f"Created data.yaml with {len(categories)} categories")
 
 
 def main():

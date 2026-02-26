@@ -13,7 +13,7 @@ from datetime import datetime
 
 def detect_damages(
     image_path,
-    model_path='runs/detect/rental_car_damage/weights/best.pt',
+    model_path='runs/detect/yolo11m_cardd_6classes/weights/best.pt',
     conf_threshold=0.25,
     save_output=True,
     output_dir='detections'
@@ -114,7 +114,7 @@ def detect_damages(
             print(f"    Location: ({bbox['x1']:.0f}, {bbox['y1']:.0f})")
             print(f"    Size: {bbox['width']:.0f} x {bbox['height']:.0f} pixels")
     else:
-        print("\n✓ No damages detected! Car appears to be in good condition.")
+        print("\nNo damages detected! Car appears to be in good condition.")
 
     # Save results
     if save_output:
@@ -153,7 +153,7 @@ def detect_damages(
 
 def batch_detect(
     image_dir,
-    model_path='runs/detect/rental_car_damage/weights/best.pt',
+    model_path='runs/detect/yolo11m_cardd_6classes/weights/best.pt',
     conf_threshold=0.25,
     output_dir='batch_detections'
 ):
@@ -249,7 +249,7 @@ def main():
         conf_idx = sys.argv.index('--conf')
         conf_threshold = float(sys.argv[conf_idx + 1])
 
-    model_path = 'runs/detect/rental_car_damage/weights/best.pt'
+    model_path = 'runs/detect/yolo11m_cardd_6classes/weights/best.pt'
     if '--model' in sys.argv:
         model_idx = sys.argv.index('--model')
         model_path = sys.argv[model_idx + 1]

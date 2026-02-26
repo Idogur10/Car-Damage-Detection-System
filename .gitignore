@@ -11,17 +11,13 @@ __pycache__/
 dist/
 build/
 
-# Datasets (large files - don't upload)
+# Datasets (large files)
 CarDD_release/
-data/CarDD_YOLO/
+CarDD_YOLO_6classes/
 *.zip
 
 # Model weights (large files)
-models/pretrained/*.pt
-models/trained/*.pt
 *.pt
-
-# Training outputs (large files)
 runs/
 
 # Large result files
