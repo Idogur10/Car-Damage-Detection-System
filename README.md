@@ -8,41 +8,29 @@ End-to-end pipeline for detecting, classifying, and estimating repair costs for 
 Input Image → YOLO Detection → CLIP Severity & Location → Cost Estimation → PDF Report
 ```
 
-Built with **YOLOv11m** (object detection), **CLIP** (zero-shot severity/location classification), and **fpdf2** (report generation). Trained on the [CarDD dataset](https://cardd-ustc.github.io/) — 4,000 real-world car damage images across 6 damage types.
+Built with **YOLOv11m** (object detection), **CLIP** (zero-shot severity/location classification), and **fpdf2** (report generation).
 
 ---
 
-## Full Pipeline
-
-```bash
-# Single image → PDF report + JSON
-python scripts/full_pipeline.py car_photo.jpg
-
-# Batch mode — all images in a folder
-python scripts/full_pipeline.py car_photos/ --batch
-
-# Custom confidence threshold
-python scripts/full_pipeline.py car_photo.jpg --conf 0.5
-```
-
-### Pipeline Flow
+## 1. Pipeline Overview
 
 ```
 Input Image
     │
     ▼
 Step 1: YOLO Detection
+    Detects all damages in the image
     → bounding boxes + damage type + confidence
     │
     ▼ (for each detection)
 Step 2: Crop damage region (with 15% padding for context)
     │
-    ├─ Step 3a: CLIP Severity (on CROP)
+    ├─ Step 3a: CLIP Severity (analyzes the CROP)
     │  Compares crop against text prompts like
     │  "a deep scratch exposing bare metal"
     │  → minor / moderate / severe
     │
-    ├─ Step 3b: CLIP Location (on FULL IMAGE)
+    ├─ Step 3b: CLIP Location (analyzes the FULL IMAGE)
     │  Sends full image with red rectangle highlighting
     │  the damage bbox → hood / door / bumper / etc.
     │
@@ -55,25 +43,71 @@ Step 5: PDF Report
     → annotated image + summary table + per-damage details + total cost
 ```
 
-### Demo Reports
+### Usage
 
-Pipeline output on test images (images the model has **never seen** during training):
+```bash
+# Single image → PDF report + JSON
+python scripts/full_pipeline.py car_photo.jpg
 
-| Image | Damages Found | Assessment | Total Cost |
-|-------|--------------|------------|------------|
-| 000088 | 2 — crack + scratch | crack: minor, fender / scratch: moderate, fender | $300 - $1,100 |
-| 000320 | 1 — glass shatter | severe, windshield (83% confidence) | $400 - $1,500 |
-| 000848 | 4 — scratch + 3 dents | scratch: moderate / dents: moderate-severe, rear | $1,700 - $6,300 |
+# Batch mode — all images in a folder
+python scripts/full_pipeline.py car_photos/ --batch
 
-Generated PDF reports are saved in the [`reports/`](reports/) directory.
+# Custom confidence threshold
+python scripts/full_pipeline.py car_photo.jpg --conf 0.5
+```
 
 ---
 
-## YOLO Detection Results
+## 2. YOLO Detection — Training & Results
 
-### Validation Set Performance (100 epochs)
+We trained **YOLOv11m** (20M parameters) for 100 epochs using transfer learning from COCO pretrained weights. The model was trained on 2,816 training images and evaluated on 810 validation images after each epoch.
 
-The best model checkpoint is selected based on **validation mAP** — the highest mAP50 achieved during training:
+### Training Configuration
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Model | YOLOv11m | 20M parameters, COCO pretrained |
+| Image size | 640px | Standard YOLO input |
+| Batch size | 8 | Fits in 6GB VRAM |
+| Optimizer | SGD | lr=0.01 (fresh), lr=0.001 (continue) |
+| Epochs | 100 | With early stopping patience=100 |
+| GPU | RTX 3060 6GB | ~2 min/epoch |
+
+### Augmentations (training only)
+
+| Augmentation | Value | Description |
+|-------------|-------|-------------|
+| Mosaic | 0.5 | Combines 4 images into one (50% probability) |
+| Horizontal flip | 0.5 | Left-right flip (50% probability) |
+| Rotation | +/-15 deg | Random rotation |
+| Translation | 0.2 | Random shift up to 20% |
+| Scale | 0.5 | Random zoom 50%-150% |
+
+> Augmentations are applied to the **training** images only. Validation and test images are evaluated clean, without any augmentation.
+
+### Training Curves
+
+Training and validation metrics over 100 epochs — the loss decreases steadily and mAP plateaus around epoch 60-80, showing the model converged without overfitting:
+
+![Training Results](results/training_curves/results.png)
+
+### Confidence Threshold Selection (from validation set)
+
+We use a confidence threshold of **0.35** for the pipeline (default YOLO is 0.25).
+
+**How was this chosen?** By looking at the **validation set's** F1-Confidence curve. The F1 score balances precision (how many detections are correct) and recall (how many real damages are found). The F1 curve peaks around 0.35-0.40 for most classes, so 0.35 gives the best tradeoff:
+
+- **Lower (0.25):** More detections, but includes low-confidence predictions that may be false positives
+- **0.35 (chosen):** Best F1 tradeoff — catches most real damages while filtering out noise
+- **Higher (0.50):** Fewer false positives, but misses some real damages (lower recall)
+
+The threshold was selected from the **validation set** (not test set) to avoid data leakage — the test set is only used for final evaluation, never for tuning.
+
+![Validation F1 Curve](results/training_curves/BoxF1_curve.png)
+
+### Test vs Validation Comparison
+
+After training and threshold selection, we evaluated the final model on the **374 test images** it has never seen:
 
 | Metric | Validation | Test |
 |--------|-----------|------|
@@ -82,62 +116,30 @@ The best model checkpoint is selected based on **validation mAP** — the highes
 | Precision | 0.776 | 0.781 |
 | Recall | 0.695 | 0.697 |
 
-Validation and test scores are very close, confirming the model generalizes well and is not overfitting.
+**The validation and test scores are nearly identical.** This confirms the model **generalizes well** and is **not overfitting** — it performs just as well on completely new images as it does on the validation set used during training. This is exactly what we want: the validation set was a reliable proxy for real-world performance.
 
-### Test Set Performance (per-class)
+### Test Set Per-Class Performance
 
-| Class | mAP50 | Precision | Recall | Notes |
-|-------|-------|-----------|--------|-------|
-| glass shatter | 0.987 | 0.912 | 0.986 | Best — visually distinctive |
-| tire flat | 0.923 | 0.969 | 0.844 | Strong — unique shape |
-| lamp broken | 0.909 | 0.921 | 0.783 | Strong — clear visual pattern |
-| dent | 0.640 | 0.706 | 0.585 | Harder — subtle deformations |
-| scratch | 0.621 | 0.679 | 0.567 | Harder — fine surface marks |
-| crack | 0.375 | 0.501 | 0.417 | Hardest — rare + subtle |
+| Class | mAP50 | Precision | Recall | Why? |
+|-------|-------|-----------|--------|------|
+| glass shatter | 0.987 | 0.912 | 0.986 | Shattered glass has a very distinctive visual pattern — easy for the model to learn |
+| tire flat | 0.923 | 0.969 | 0.844 | Flat tires have a unique shape that stands out from normal tires |
+| lamp broken | 0.909 | 0.921 | 0.783 | Broken headlights/taillights have clear broken glass and housing damage |
+| dent | 0.640 | 0.706 | 0.585 | Dents are subtle — they're deformations in metal that depend on lighting and viewing angle |
+| scratch | 0.621 | 0.679 | 0.567 | Scratches are thin surface marks that can be hard to see, especially at low resolution |
+| crack | 0.375 | 0.501 | 0.417 | Cracks are both rare (898 annotations vs 3,595 for scratch) and visually subtle |
 
-> Classes with distinctive visual features (shattered glass, flat tires) are detected reliably. Subtle damage types (scratches, cracks) are harder — they depend on lighting, angle, and image resolution.
-
-### Confidence Threshold Selection
-
-We use a confidence threshold of **0.35** for the pipeline (default YOLO is 0.25).
-
-**How was this chosen?** By looking at the validation set's F1-Confidence curve. The F1 score balances precision and recall — too low a threshold gives many false positives, too high misses real damages. The F1 curve peaks around 0.35-0.40 for most classes, so 0.35 is a good balance:
-
-- **Lower (0.25):** More detections, but includes low-confidence predictions that may be false positives
-- **0.35 (chosen):** Best F1 tradeoff — catches most real damages while filtering out noise
-- **Higher (0.50):** Fewer false positives, but misses some real damages (lower recall)
-
-The threshold was selected from the **validation set** (not test set) to avoid data leakage. The test set is only used for final evaluation.
-
-### Training Curves
-
-Training and validation metrics over 100 epochs:
-
-![Training Results](results/training_curves/results.png)
-
-### Validation Predictions
-
-Model predictions on validation images (used to track performance during training — **never trained on**):
-
-![Validation Batch 0 - Predictions](results/validation_predictions/val_batch0_pred.jpg)
-
-![Validation Batch 1 - Predictions](results/validation_predictions/val_batch1_pred.jpg)
-
-Ground truth labels for comparison:
-
-![Validation Batch 0 - Ground Truth](results/validation_predictions/val_batch0_labels.jpg)
+**Pattern:** Classes with distinctive, high-contrast visual features (shattered glass, flat tires, broken lamps) are detected with 90%+ mAP. Subtle damage types (dents, scratches, cracks) that depend on lighting, angle, and resolution score lower. Crack is the hardest class — it has both the fewest training samples and the most subtle visual appearance.
 
 ### Test Set Predictions
 
-Model predictions on the held-out **test set** (never seen during training or validation):
+Model predictions on the held-out test set (never seen during training or validation) alongside ground truth labels:
 
 ![Test Batch 0 - Predictions](results/test_set/test_batch0_pred.jpg)
 
-![Test Batch 1 - Predictions](results/test_set/test_batch1_pred.jpg)
-
-Ground truth for comparison:
-
 ![Test Batch 0 - Ground Truth](results/test_set/test_batch0_labels.jpg)
+
+![Test Batch 1 - Predictions](results/test_set/test_batch1_pred.jpg)
 
 ### Test Set Confusion Matrix
 
@@ -147,77 +149,30 @@ Ground truth for comparison:
 
 ![Test PR Curve](results/test_set/BoxPR_curve.png)
 
-### Training Confusion Matrix
-
-![Training Confusion Matrix](results/confusion_matrix/confusion_matrix_normalized.png)
-
-### Class Distribution
-
-Distribution of annotations across the 6 damage classes in the dataset:
-
-![Class Distribution](results/class_distribution/labels.jpg)
-
 ---
 
-## Dataset — CarDD (Car Damage Detection)
-
-The [CarDD dataset](https://cardd-ustc.github.io/) contains 4,000 images with 9,740 bounding box annotations across 6 damage categories.
-
-### Data Splits
-
-| Split | Images | Purpose |
-|-------|--------|---------|
-| **Train** | 2,816 | Model learns from these images (with augmentations) |
-| **Validation** | 810 | Evaluated after each epoch to track performance and prevent overfitting — the model **never trains** on these |
-| **Test** | 374 | Final held-out evaluation — the model **never sees** these during training or validation |
-
-### Damage Classes (6 total)
-
-| Class | Train Annotations | Description |
-|-------|-------------------|-------------|
-| scratch | 3,595 | Surface scratches on body panels |
-| dent | 2,543 | Dents and deformations |
-| crack | 898 | Cracks in body/bumper |
-| lamp broken | 704 | Broken headlights/taillights |
-| glass shatter | 681 | Shattered windows/windshields |
-| tire flat | 319 | Flat or damaged tires |
-
-> **Note:** The dataset is imbalanced — scratches have 11x more annotations than tire flats. This is reflected in the per-class detection performance.
-
----
-
-## How Training, Validation, and Test Work
-
-| Phase | Data Used | When | Purpose |
-|-------|-----------|------|---------|
-| **Training** | 2,816 images (with augmentation) | Every epoch | Model learns to detect damage by adjusting weights |
-| **Validation** | 810 images (no augmentation) | After each epoch | Monitors performance to detect overfitting. The best model is saved based on validation mAP |
-| **Test** | 374 images (no augmentation) | After training is done | Final unbiased evaluation on completely unseen data |
-
-- The model **only learns** from training images
-- Validation images are used to pick the best checkpoint and tune the confidence threshold — they are **not** used for training
-- Test images are a fully held-out set — used **only once** for final evaluation
-
----
-
-## Damage Assessment Pipeline (CLIP-based)
+## 3. CLIP-based Damage Assessment
 
 Beyond detection, the system uses **CLIP (Contrastive Language-Image Pretraining)** to assess each detected damage — classifying its **severity** and **car panel location** without any additional training.
 
-### How CLIP Works Here
+### What is CLIP?
 
-CLIP is a vision-language model from OpenAI. It takes an image and a list of text descriptions, and scores how well each text matches the image. We use this for **zero-shot classification** — no training needed.
+CLIP is a vision-language model from OpenAI. It takes an image and a list of text descriptions, and scores how well each text matches the image. We use this for **zero-shot classification** — no training needed, no labeled severity data required.
+
+### How It Works
+
+For each bounding box detected by YOLO, we run two CLIP classifications:
 
 **Severity classification** (uses the **cropped** damage region):
-- For each damage type, we have 3 text prompts describing minor/moderate/severe
+- We crop the bounding box from the image (with 15% padding around it for context)
+- CLIP compares the crop against 3 text prompts per damage type (minor / moderate / severe)
 - Example for scratch: "a photo of a light surface scratch, paint still intact" vs "a photo of a deep scratch exposing bare metal"
-- CLIP scores all 3 and picks the best match
-- We use the **crop** (not full image) so CLIP sees the damage up close — depth, texture, material exposure
+- We use the **crop** so CLIP sees the damage up close — it can judge depth, texture, and material exposure
 
 **Location classification** (uses the **full image** with red rectangle):
 - We draw a red rectangle on the full car image around the bounding box
 - CLIP compares against 17 location prompts: "damage on a car hood", "damage on a car front door", etc.
-- We use the **full image** (not crop) because a crop loses spatial context — you can't tell if a scratched surface is a hood or a door without seeing the whole car
+- We use the **full image** because a crop loses spatial context — you can't tell if a scratched surface is a hood or a door without seeing the whole car
 
 ### Why CLIP? Alternatives Considered
 
@@ -229,13 +184,13 @@ CLIP is a vision-language model from OpenAI. It takes an image and a list of tex
 | Fine-Tuned CLIP | High | Medium | Medium (needs some labels) | Free | Yes |
 | LLM Vision API (GPT-4V) | Very high | Slow | Very low | $$$ per image | No |
 
-**Advantages of our approach (CLIP zero-shot):**
+**Advantages of CLIP zero-shot:**
 - No training or fine-tuning needed — works out of the box
 - No labeled severity data required (the CarDD dataset has no severity annotations)
 - Easy to modify — changing classification categories only requires editing text prompts
 - Runs locally, no API costs, no internet required
 
-**Disadvantages of our approach:**
+**Disadvantages of CLIP zero-shot:**
 - Moderate confidence scores (~50-70%) — CLIP is a general-purpose model, not specialized for car damage
 - Severity is subjective — there is no ground truth to validate against
 - Location accuracy depends on how much of the car is visible in the image
@@ -244,7 +199,7 @@ CLIP is a vision-language model from OpenAI. It takes an image and a list of tex
 
 ### Cost Estimation
 
-A lookup table maps (damage_type + severity) to an estimated USD repair cost range:
+A simple lookup table maps (damage_type + severity) to an estimated USD repair cost range:
 
 | Damage Type | Minor | Moderate | Severe |
 |------------|-------|----------|--------|
@@ -266,11 +221,127 @@ A lookup table maps (damage_type + severity) to an estimated USD repair cost ran
 - **Sensitivity to image quality** — blurry, dark, or very close-up images may reduce CLIP's classification accuracy.
 - **CLIP is not car-specific** — it's a general vision-language model trained on internet images. It understands "scratch" and "dent" broadly, but not with the precision of an auto body expert.
 
-### Upgrade Path
+---
 
-1. **V1 (current):** CLIP zero-shot — works out of the box with no labeled data
-2. **V2:** Fine-tune CLIP or train a small CNN once real-world severity feedback is collected
-3. **V3:** Hybrid — specialized CNN for severity, CLIP for location, LLM for written report generation
+## 4. Full Pipeline Demo — Results on Test Images
+
+These are real outputs from the full pipeline running on **test images** — images the model has never seen during training or validation. Each image produces a PDF report with annotated image, damage summary table, individual damage details, and total cost estimate.
+
+### Demo 1: Glass Shatter (image 000320)
+
+![Glass Shatter - Annotated](results/pipeline_demo/glass_shatter.jpg)
+
+**YOLO detected:** 1 damage — glass shatter with 94% confidence.
+
+**CLIP assessment:**
+- **Severity: severe (70% confidence)** — the windshield is completely shattered with a dense spiderweb crack pattern covering the entire glass surface. CLIP correctly identifies this as severe because the glass is not just chipped or cracked — it's fully compromised with no intact area remaining.
+- **Location: windshield (83% confidence)** — this is the highest location confidence across all demos. The shattered glass clearly fills the entire windshield area, making it unambiguous for CLIP.
+
+**Cost estimate:** $400 - $1,500 (full OEM glass replacement)
+
+**Why these results make sense:** Glass shatter is the easiest damage type for both YOLO (98.7% mAP) and CLIP. The visual pattern is unmistakable — spiderweb cracks across a flat glass surface. This is the kind of case where the pipeline works best.
+
+**Generated PDF report:**
+
+![Glass Shatter Report - Page 1](results/pipeline_demo/pdf_glass_shatter_page1.png)
+
+![Glass Shatter Report - Page 2](results/pipeline_demo/pdf_glass_shatter_page2.png)
+
+### Demo 2: Scratch + Crack (image 000088)
+
+![Scratch and Crack - Annotated](results/pipeline_demo/scratches_and_cracks.jpg)
+
+**YOLO detected:** 2 damages — a crack (59% confidence) and a scratch (35% confidence).
+
+**CLIP assessment:**
+- **Crack: minor severity (53%)** — the crack is small and confined to one area. CLIP's scores were close between minor (53%) and severe (42%), showing uncertainty — cracks are visually ambiguous for CLIP since a small crack and the edge of a large crack can look similar in a crop.
+- **Scratch: moderate severity (52%)** — nearly tied with minor (46%), suggesting this is a borderline case. The scratch shows some primer underneath but the paint isn't fully removed — a textbook moderate case, though CLIP is not confident.
+- **Both located on fender (28% and 44%)** — the damage is near the wheel arch area. The scratch has higher location confidence because the surrounding fender/wheel context is more visible in that part of the image.
+
+**Cost estimate:** $300 - $1,100 total (filler repair + touch-up paint)
+
+**Why these results make sense:** Scratches and cracks are the hardest damage types for YOLO (62% and 37% mAP respectively). The lower YOLO confidence (35% for the scratch — barely above our 0.35 threshold) and the lower CLIP severity confidence (52-53%) reflect the genuine difficulty of these subtle damage types.
+
+**Generated PDF report:**
+
+![Scratch + Crack Report - Page 1](results/pipeline_demo/pdf_scratches_and_cracks_page1.png)
+
+![Scratch + Crack Report - Page 2](results/pipeline_demo/pdf_scratches_and_cracks_page2.png)
+
+### Demo 3: Multiple Damages (image 000848)
+
+![Multiple Damages - Annotated](results/pipeline_demo/multiple_damages.jpg)
+
+**YOLO detected:** 4 damages — 1 scratch (76% confidence) and 3 dents (68%, 45%, 42% confidence).
+
+**CLIP assessment:**
+- **Scratch: moderate (76% confidence)** — this is the highest CLIP severity confidence across all demos. The scratch clearly shows primer underneath the surface paint, which matches the "moderate" prompt describing "visible scratch showing primer underneath". CLIP located it on the rear bumper (21%) — low confidence because several panels scored similarly (fender 20%, rear bumper 21%, rear door 19%).
+- **Dent #1: moderate (68%)** — a noticeable dent on the rear door panel (26% location confidence). The panel shows visible deformation that needs body work but isn't completely crushed.
+- **Dent #2: moderate (75%)** — the largest dent covering a significant area of the rear door (29% location confidence). Despite its size, CLIP classified it as moderate rather than severe because the panel is deformed but not torn or pierced.
+- **Dent #3: severe (56%)** — a narrow but deep crease along the body line. CLIP's lower confidence (56%) shows it's a borderline case between moderate (39%) and severe (56%), which makes sense — deep creases along body lines are among the hardest dents to repair because they affect structural lines.
+
+**Cost estimate:** $1,700 - $6,300 total (touch-up paint + body filler + panel replacement)
+
+**Why these results make sense:** This is the most complex case — multiple damages on the same car. The dents are all on the rear door area, which CLIP consistently identifies despite moderate confidence. The severe dent has the highest cost ($1,000-$3,500) because panel replacement is the most expensive repair type. The total $1,700-$6,300 range reflects the reality that a car with 4 damages on the rear section likely had a significant rear-end impact.
+
+**Generated PDF report:**
+
+![Multiple Damages Report - Page 1](results/pipeline_demo/pdf_multiple_damages_page1.png)
+
+![Multiple Damages Report - Page 2](results/pipeline_demo/pdf_multiple_damages_page2.png)
+
+![Multiple Damages Report - Page 3](results/pipeline_demo/pdf_multiple_damages_page3.png)
+
+### Summary — What Works Well and What Doesn't
+
+| Scenario | YOLO | CLIP Severity | CLIP Location | Overall |
+|----------|------|---------------|---------------|---------|
+| Glass/lamp/tire (distinctive) | Very high conf. (90%+) | High conf. (60-70%) | High conf. (80%+) | Reliable |
+| Dents (moderate) | Good conf. (40-70%) | Good conf. (65-75%) | Moderate conf. (25-35%) | Reasonable |
+| Scratches/cracks (subtle) | Lower conf. (35-60%) | Lower conf. (50-55%) | Lower conf. (20-45%) | Use with caution |
+
+The pipeline works best for visually obvious damage (shattered glass, flat tires, broken lamps) and gives reasonable estimates for moderate damage (dents). For subtle damage (light scratches, hairline cracks), both detection and classification confidence are lower — results should be treated as approximate.
+
+---
+
+## 5. Dataset — CarDD (Car Damage Detection)
+
+The [CarDD dataset](https://cardd-ustc.github.io/) contains 4,000 real-world car damage images with 9,740 bounding box annotations across 6 damage categories.
+
+### Data Splits
+
+| Split | Images | Purpose |
+|-------|--------|---------|
+| **Train** | 2,816 | Model learns from these images (with augmentations) |
+| **Validation** | 810 | Evaluated after each epoch to track performance, tune the confidence threshold, and select the best model checkpoint — the model **never trains** on these |
+| **Test** | 374 | Final held-out evaluation — the model **never sees** these during training or validation |
+
+### Damage Classes (6 total)
+
+| Class | Train Annotations | Description |
+|-------|-------------------|-------------|
+| scratch | 3,595 | Surface scratches on body panels |
+| dent | 2,543 | Dents and deformations |
+| crack | 898 | Cracks in body/bumper |
+| lamp broken | 704 | Broken headlights/taillights |
+| glass shatter | 681 | Shattered windows/windshields |
+| tire flat | 319 | Flat or damaged tires |
+
+> **Note:** The dataset is imbalanced — scratches have 11x more annotations than tire flats. This imbalance is reflected in the per-class detection performance: scratch and crack (common but subtle) have lower mAP than glass shatter and tire flat (rare but visually distinctive).
+
+![Class Distribution](results/class_distribution/labels.jpg)
+
+### How Training, Validation, and Test Work
+
+| Phase | Data Used | When | Purpose |
+|-------|-----------|------|---------|
+| **Training** | 2,816 images (with augmentation) | Every epoch | Model learns to detect damage by adjusting weights |
+| **Validation** | 810 images (no augmentation) | After each epoch | Monitors performance to detect overfitting. The best model checkpoint is saved based on validation mAP |
+| **Test** | 374 images (no augmentation) | After training is done | Final unbiased evaluation on completely unseen data |
+
+- The model **only learns** from training images
+- Validation images are used to **pick the best checkpoint** and **tune the confidence threshold** — they are **not** used for training
+- Test images are a fully held-out set — used **only once** for final evaluation
 
 ---
 
@@ -309,12 +380,17 @@ Edit the top of the script to configure:
 ### 4. Run Full Pipeline
 
 ```bash
-python scripts/full_pipeline.py car_image.jpg
+# Single image → PDF report + JSON
+python scripts/full_pipeline.py car_photo.jpg
+
+# Batch mode — all images in a folder
 python scripts/full_pipeline.py car_photos/ --batch
-python scripts/full_pipeline.py car_image.jpg --conf 0.5
+
+# Custom confidence threshold
+python scripts/full_pipeline.py car_photo.jpg --conf 0.5
 ```
 
-Output: PDF report + JSON file in `reports/`.
+Output: PDF report + JSON file saved to `reports/`.
 
 Or use components individually in Python:
 
@@ -338,28 +414,11 @@ cost = estimate_cost("scratch", "moderate")
 
 ---
 
-## Training Configuration
+## Upgrade Path
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| Model | YOLOv11m | 20M parameters, COCO pretrained |
-| Image size | 640px | Standard YOLO input |
-| Batch size | 8 | Fits in 6GB VRAM |
-| Optimizer | SGD | lr=0.01 (fresh), lr=0.001 (continue) |
-| Epochs | 100 | With early stopping patience=100 |
-| GPU | RTX 3060 6GB | ~2 min/epoch |
-
-### Augmentations
-
-| Augmentation | Value | Description |
-|-------------|-------|-------------|
-| Mosaic | 0.5 | Combines 4 images into one (50% probability) |
-| Horizontal flip | 0.5 | Left-right flip (50% probability) |
-| Rotation | +/-15 deg | Random rotation |
-| Translation | 0.2 | Random shift up to 20% |
-| Scale | 0.5 | Random zoom 50%-150% |
-
-> Augmentations are applied to the **training** images only. Validation and test images are evaluated without any augmentation.
+1. **V1 (current):** CLIP zero-shot — works out of the box with no labeled data
+2. **V2:** Fine-tune CLIP or train a small CNN once real-world severity feedback is collected
+3. **V3:** Hybrid — specialized CNN for severity, CLIP for location, LLM for written report generation
 
 ---
 
@@ -378,12 +437,15 @@ scripts/
 
 results/                            # Result images (for this README)
     training_curves/                # Loss curves, mAP, PR, F1 plots
-    confusion_matrix/               # Training confusion matrices
-    validation_predictions/         # Model predictions on validation images
+    confusion_matrix/               # Validation confusion matrices
     test_set/                       # Test set evaluation results
+    pipeline_demo/                  # Annotated images + PDF screenshots from demos
     class_distribution/             # Dataset class distribution
 
 reports/                            # Generated PDF reports (pipeline output)
+    demo_report_glass_shatter.pdf   # Demo: glass shatter → severe, windshield
+    demo_report_scratches_and_cracks.pdf  # Demo: crack + scratch
+    demo_report_multiple_damages.pdf      # Demo: 4 damages on one car
 
 runs/detect/yolo11m_cardd_6classes/ # Full training output (gitignored)
     weights/best.pt                 # Best model weights
